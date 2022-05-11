@@ -381,25 +381,16 @@ class OneHotEncoder(_BaseEncoder):
                  categories=None, sparse=True, dtype=np.float64,
                  handle_unknown='error'):
         self._categories = categories
-        if categories is None:
-            self.categories = 'auto'
-        else:
-            self.categories = categories
+        self.categories = 'auto' if categories is None else categories
         self.sparse = sparse
         self.dtype = dtype
         self.handle_unknown = handle_unknown
 
-        if n_values is not None:
-            pass
-            # warnings.warn("Deprecated", DeprecationWarning)
-        else:
+        if n_values is None:
             n_values = "auto"
         self._deprecated_n_values = n_values
 
-        if categorical_features is not None:
-            pass
-            # warnings.warn("Deprecated", DeprecationWarning)
-        else:
+        if categorical_features is None:
             categorical_features = "all"
         self._deprecated_categorical_features = categorical_features
 
@@ -495,26 +486,24 @@ class OneHotEncoder(_BaseEncoder):
 
             self._legacy_mode = False
 
-        else:  # n_values = 'auto'
-            if self.handle_unknown == 'ignore':
-                # no change in behaviour, no need to raise deprecation warning
+        elif self.handle_unknown == 'ignore':
+            # no change in behaviour, no need to raise deprecation warning
+            self._legacy_mode = False
+        else:
+
+            # check if we have integer or categorical input
+            try:
+                X = check_array(X, dtype=np.int)
+            except ValueError:
                 self._legacy_mode = False
             else:
+                warnings.warn(WARNING_MSG, DeprecationWarning)
+                self._legacy_mode = True
 
-                # check if we have integer or categorical input
-                try:
-                    X = check_array(X, dtype=np.int)
-                except ValueError:
-                    self._legacy_mode = False
-                else:
-                    warnings.warn(WARNING_MSG, DeprecationWarning)
-                    self._legacy_mode = True
-
-        if (not isinstance(self._deprecated_categorical_features,
-                           six.string_types)
-                or (isinstance(self._deprecated_categorical_features,
-                               six.string_types)
-                    and self._deprecated_categorical_features != 'all')):
+        if (
+            not isinstance(self._deprecated_categorical_features, six.string_types)
+            or self._deprecated_categorical_features != 'all'
+        ):
             if user_set_categories:
                 raise ValueError(
                     "The 'categorical_features' keyword is deprecated, and "
@@ -545,10 +534,10 @@ class OneHotEncoder(_BaseEncoder):
         if self._legacy_mode:
             # TODO not with _transform_selected ??
             self._legacy_fit_transform(X)
-            return self
         else:
             self._fit(X, handle_unknown=self.handle_unknown)
-            return self
+
+        return self
 
     def _legacy_fit_transform(self, X):
         """Assumes X contains only categorical features."""
@@ -698,10 +687,7 @@ class OneHotEncoder(_BaseEncoder):
         out = sparse.csr_matrix((data, indices, indptr),
                                 shape=(n_samples, feature_indices[-1]),
                                 dtype=self.dtype)
-        if not self.sparse:
-            return out.toarray()
-        else:
-            return out
+        return out.toarray() if not self.sparse else out
 
     def transform(self, X):
         """Transform X using one-hot encoding.
@@ -716,12 +702,16 @@ class OneHotEncoder(_BaseEncoder):
         X_out : sparse matrix if sparse=True else a 2-d array
             Transformed input.
         """
-        if not self._legacy_mode:
-            return self._transform_new(X)
-        else:
-            return _transform_selected(X, self._legacy_transform,
-                                       self._deprecated_categorical_features,
-                                       copy=True)
+        return (
+            _transform_selected(
+                X,
+                self._legacy_transform,
+                self._deprecated_categorical_features,
+                copy=True,
+            )
+            if self._legacy_mode
+            else self._transform_new(X)
+        )
 
     def inverse_transform(self, X):
         """Convert back the data to the original representation.
@@ -748,12 +738,12 @@ class OneHotEncoder(_BaseEncoder):
 
         n_samples, _ = X.shape
         n_features = len(self.categories_)
-        n_transformed_features = sum([len(cats) for cats in self.categories_])
+        n_transformed_features = sum(len(cats) for cats in self.categories_)
 
-        # validate shape of passed X
-        msg = ("Shape of the passed X data is not correct. Expected {0} "
-               "columns, got {1}.")
         if X.shape[1] != n_transformed_features:
+            # validate shape of passed X
+            msg = ("Shape of the passed X data is not correct. Expected {0} "
+                   "columns, got {1}.")
             raise ValueError(msg.format(n_transformed_features, X.shape[1]))
 
         # create resulting array of appropriate dtype
@@ -913,10 +903,10 @@ class OrdinalEncoder(_BaseEncoder):
         n_samples, _ = X.shape
         n_features = len(self.categories_)
 
-        # validate shape of passed X
-        msg = ("Shape of the passed X data is not correct. Expected {0} "
-               "columns, got {1}.")
         if X.shape[1] != n_features:
+            # validate shape of passed X
+            msg = ("Shape of the passed X data is not correct. Expected {0} "
+                   "columns, got {1}.")
             raise ValueError(msg.format(n_features, X.shape[1]))
 
         # create resulting array of appropriate dtype
@@ -1214,8 +1204,10 @@ boolean mask array or callable
                 raise AttributeError("Transformer %s (type %s) does not "
                                      "provide get_feature_names."
                                      % (str(name), type(trans).__name__))
-            feature_names.extend([name + "__" + f for f in
-                                  trans.get_feature_names()])
+            feature_names.extend(
+                [f"{name}__{f}" for f in trans.get_feature_names()]
+            )
+
         return feature_names
 
     def _update_fitted_transformers(self, transformers):
@@ -1250,7 +1242,7 @@ boolean mask array or callable
         """
         names = [name for name, _, _, _ in self._iter(replace_strings=True)]
         for Xs, name in zip(result, names):
-            if not getattr(Xs, 'ndim', 0) == 2:
+            if getattr(Xs, 'ndim', 0) != 2:
                 raise ValueError(
                     "The output of the '{0}' transformer should be 2D (scipy "
                     "matrix, array, or pandas DataFrame).".format(name))
@@ -1265,10 +1257,12 @@ boolean mask array or callable
         """
         try:
             return Parallel(n_jobs=self.n_jobs)(
-                delayed(func)(clone(trans) if not fitted else trans,
-                              X_sel, y, weight)
+                delayed(func)(trans if fitted else clone(trans), X_sel, y, weight)
                 for _, trans, X_sel, weight in self._iter(
-                    X=X, fitted=fitted, replace_strings=True))
+                    X=X, fitted=fitted, replace_strings=True
+                )
+            )
+
         except ValueError as e:
             if "Expected 2D array, got 1D array instead" in str(e):
                 raise ValueError(_ERR_MSG_1DCOLUMN)
@@ -1388,9 +1382,8 @@ boolean mask array or callable
         """
         if self.sparse_output_:
             return sparse.hstack(Xs).tocsr()
-        else:
-            Xs = [f.toarray() if sparse.issparse(f) else f for f in Xs]
-            return np.hstack(Xs)
+        Xs = [f.toarray() if sparse.issparse(f) else f for f in Xs]
+        return np.hstack(Xs)
 
 
 def _check_key_type(key, superclass):
@@ -1454,30 +1447,20 @@ def _get_column(X, key):
     elif _check_key_type(key, six.string_types):
         column_names = True
     elif hasattr(key, 'dtype') and np.issubdtype(key.dtype, np.bool_):
-        # boolean mask
-        column_names = False
-        if hasattr(X, 'loc'):
-            # pandas boolean masks don't work with iloc, so take loc path
-            column_names = True
+        column_names = bool(hasattr(X, 'loc'))
     else:
         raise ValueError("No valid specification of the columns. Only a "
                          "scalar, list or slice of all integers or all "
                          "strings, or boolean mask is allowed")
 
-    if column_names:
-        if hasattr(X, 'loc'):
-            # pandas dataframes
-            return X.loc[:, key]
-        else:
-            raise ValueError("Specifying the columns using strings is only "
-                             "supported for pandas DataFrames")
+    if not column_names:
+        return X.iloc[:, key] if hasattr(X, 'iloc') else X[:, key]
+    if hasattr(X, 'loc'):
+        # pandas dataframes
+        return X.loc[:, key]
     else:
-        if hasattr(X, 'iloc'):
-            # pandas dataframes
-            return X.iloc[:, key]
-        else:
-            # numpy arrays, sparse arrays
-            return X[:, key]
+        raise ValueError("Specifying the columns using strings is only "
+                         "supported for pandas DataFrames")
 
 
 def _get_column_indices(X, key):
@@ -1512,11 +1495,7 @@ def _get_column_indices(X, key):
             start, stop = key.start, key.stop
             if start is not None:
                 start = all_columns.index(start)
-            if stop is not None:
-                # pandas indexing with strings is endpoint included
-                stop = all_columns.index(stop) + 1
-            else:
-                stop = n_columns + 1
+            stop = all_columns.index(stop) + 1 if stop is not None else n_columns + 1
             return list(range(n_columns)[slice(start, stop)])
         else:
             columns = list(key)
@@ -1541,8 +1520,7 @@ def _get_transformer_list(estimators):
     columns = [trans[0] for trans in estimators]
     names = [trans[0] for trans in _name_estimators(transformers)]
 
-    transformer_list = list(zip(names, transformers, columns))
-    return transformer_list
+    return list(zip(names, transformers, columns))
 
 
 def make_column_transformer(*transformers, **kwargs):
@@ -1603,8 +1581,7 @@ def make_column_transformer(*transformers, **kwargs):
     n_jobs = kwargs.pop('n_jobs', 1)
     remainder = kwargs.pop('remainder', 'drop')
     if kwargs:
-        raise TypeError('Unknown keyword arguments: "{}"'
-                        .format(list(kwargs.keys())[0]))
+        raise TypeError(f'Unknown keyword arguments: "{list(kwargs.keys())[0]}"')
     transformer_list = _get_transformer_list(transformers)
     return ColumnTransformer(transformer_list, n_jobs=n_jobs,
                              remainder=remainder)
